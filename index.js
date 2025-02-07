@@ -392,107 +392,111 @@
   // Display the initial scene.
   switchScene(scenes[0]);
 
-  // --- VR-Integration für WebXR ---
-  // Prüfe, ob der VR-Button (mit der ID "enter-vr") vorhanden ist.
-  var vrButton = document.getElementById("enter-vr");
-  if (navigator.xr) {
-    vrButton.style.display = "block";
-  } else {
-    vrButton.style.display = "none";
-  }
+// --- VR-Integration für WebXR ---
+var vrButton = document.getElementById("enter-vr");
+if (navigator.xr) {
+  vrButton.style.display = "block";
+} else {
+  vrButton.style.display = "none";
+}
 
-  vrButton.addEventListener("click", async function() {
-    if (!navigator.xr) {
-      alert("WebXR wird in diesem Browser nicht unterstützt.");
+vrButton.addEventListener("click", async function() {
+  if (!navigator.xr) {
+    alert("WebXR wird in diesem Browser nicht unterstützt.");
+    return;
+  }
+  try {
+    // Stoppe alle Animationen, z. B. Autorotate.
+    stopAutorotate();
+
+    // Starte die immersive VR-Sitzung.
+    const session = await navigator.xr.requestSession("immersive-vr", {
+      optionalFeatures: ['local-floor']
+    });
+
+    // Finde das Canvas, das Marzipano im #pano-Container erzeugt.
+    const canvas = document.querySelector("#pano canvas");
+    if (!canvas) {
+      console.error("Kein Canvas-Element gefunden!");
       return;
     }
-    try {
-      // Stoppe Autorotate, um zusätzlichen Rechenaufwand zu vermeiden.
-      stopAutorotate();
 
-      // Starte eine immersive VR-Sitzung.
-      const session = await navigator.xr.requestSession("immersive-vr", {
-        optionalFeatures: ['local-floor']
-      });
+    // Versuche, einen WebGL2-Kontext anzufordern, ansonsten WebGL.
+    let gl = canvas.getContext("webgl2", { xrCompatible: true });
+    if (!gl) {
+      gl = canvas.getContext("webgl", { xrCompatible: true });
+    }
+    await gl.makeXRCompatible();
 
-      // Finde das Canvas, das Marzipano im #pano-Container erzeugt.
-      const canvas = document.querySelector("#pano canvas");
-      if (!canvas) {
-        console.error("Kein Canvas-Element gefunden!");
-        return;
-      }
+    // Erstelle ein XRWebGLLayer und weise ihn der Session zu.
+    session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
 
-      // Versuche, einen WebGL2-Kontext anzufordern, ansonsten WebGL.
-      let gl = canvas.getContext("webgl2", { xrCompatible: true });
-      if (!gl) {
-        gl = canvas.getContext("webgl", { xrCompatible: true });
-      }
-      await gl.makeXRCompatible();
+    // Lege den Referenzraum fest (hier "local-floor").
+    const refSpace = await session.requestReferenceSpace("local-floor");
 
-      // Erstelle ein XRWebGLLayer und weise ihn der Session zu.
-      session.updateRenderState({ baseLayer: new XRWebGLLayer(session, gl) });
-
-      // Lege den Referenzraum fest (hier "local-floor").
-      const refSpace = await session.requestReferenceSpace("local-floor");
-
-      // Definiere den XR-Rendering-Loop.
-      function onXRFrame(time, frame) {
-        session.requestAnimationFrame(onXRFrame);
-
-        // **Wichtig:** Binde den vom XRWebGLLayer bereitgestellten Framebuffer.
-        gl.bindFramebuffer(gl.FRAMEBUFFER, session.renderState.baseLayer.framebuffer);
-
-        const pose = frame.getViewerPose(refSpace);
-        if (pose && currentScene) {
-          // Nutze die erste View (bei monokularer Ansicht).
-          const orientation = pose.transform.orientation;
-          const euler = quaternionToEuler(orientation);
-
-          // Optional: Prüfe, ob die berechneten Werte gültig sind.
-          if (!isNaN(euler.yaw) && !isNaN(euler.pitch)) {
-            currentScene.view.setYaw(euler.yaw);
-            currentScene.view.setPitch(euler.pitch);
-          }
-        }
-        if (currentScene) {
-          currentScene.scene.render();
-        }
-      }
+    // Definiere den XR-Rendering-Loop.
+    function onXRFrame(time, frame) {
       session.requestAnimationFrame(onXRFrame);
 
-      // Bei Session-Ende: Rückkehr in den normalen Modus (optional).
-      session.addEventListener("end", function() {
-        console.log("XR-Sitzung beendet");
-        startAutorotate();
-      });
+      // Binde den vom XRWebGLLayer bereitgestellten Framebuffer.
+      gl.bindFramebuffer(gl.FRAMEBUFFER, session.renderState.baseLayer.framebuffer);
 
-    } catch (e) {
-      console.error("Fehler beim Starten der XR-Sitzung:", e);
+      const pose = frame.getViewerPose(refSpace);
+      if (pose && currentScene) {
+        // Wir nutzen die erste View (monoskopische Ansicht).
+        const orientation = pose.transform.orientation;
+        const euler = quaternionToEuler(orientation);
+        if (!isNaN(euler.yaw) && !isNaN(euler.pitch)) {
+          // Kombinierte Aktualisierung der View-Parameter:
+          const params = currentScene.view.getParameters();
+          params.yaw = euler.yaw;
+          params.pitch = euler.pitch;
+          currentScene.view.setParameters(params);
+        }
+      }
+      
+      if (currentScene) {
+        // Optional: Zeitmessung zur Überprüfung der Renderzeit
+        const t0 = performance.now();
+        // Hier könnte man alternativ setTimeout(..., 0) nutzen, um den Render-Aufruf asynchron zu machen.
+        currentScene.scene.render();
+        const t1 = performance.now();
+        console.log("Renderzeit (ms):", t1 - t0);
+      }
     }
-  });
+    session.requestAnimationFrame(onXRFrame);
 
-  // Hilfsfunktion: Konvertiert ein Quaternion in Euler-Winkel.
-  function quaternionToEuler(q) {
-    // Berechne Roll (Rotation um die x-Achse).
-    var sinr_cosp = 2 * (q.w * q.x + q.y * q.z);
-    var cosr_cosp = 1 - 2 * (q.x * q.x + q.y * q.y);
-    var roll = Math.atan2(sinr_cosp, cosr_cosp);
+    // Bei Session-Ende: Rückkehr in den normalen Modus (optional).
+    session.addEventListener("end", function() {
+      console.log("XR-Sitzung beendet");
+      startAutorotate();
+    });
 
-    // Berechne Pitch (Rotation um die y-Achse).
-    var sinp = 2 * (q.w * q.y - q.z * q.x);
-    var pitch;
-    if (Math.abs(sinp) >= 1) {
-      pitch = Math.sign(sinp) * Math.PI / 2;
-    } else {
-      pitch = Math.asin(sinp);
-    }
-
-    // Berechne Yaw (Rotation um die z-Achse).
-    var siny_cosp = 2 * (q.w * q.z + q.x * q.y);
-    var cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z);
-    var yaw = Math.atan2(siny_cosp, cosy_cosp);
-
-    return { roll: roll, pitch: pitch, yaw: yaw };
+  } catch (e) {
+    console.error("Fehler beim Starten der XR-Sitzung:", e);
   }
+});
+
+// Hilfsfunktion: Konvertiert ein Quaternion in Euler-Winkel.
+function quaternionToEuler(q) {
+  var sinr_cosp = 2 * (q.w * q.x + q.y * q.z);
+  var cosr_cosp = 1 - 2 * (q.x * q.x + q.y * q.y);
+  var roll = Math.atan2(sinr_cosp, cosr_cosp);
+
+  var sinp = 2 * (q.w * q.y - q.z * q.x);
+  var pitch;
+  if (Math.abs(sinp) >= 1) {
+    pitch = Math.sign(sinp) * Math.PI / 2;
+  } else {
+    pitch = Math.asin(sinp);
+  }
+
+  var siny_cosp = 2 * (q.w * q.z + q.x * q.y);
+  var cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z);
+  var yaw = Math.atan2(siny_cosp, cosy_cosp);
+
+  return { roll: roll, pitch: pitch, yaw: yaw };
+}
+
 
 })();
